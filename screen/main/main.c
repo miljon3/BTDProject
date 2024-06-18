@@ -5,6 +5,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_vfs.h"
@@ -71,14 +72,6 @@ static const char *TAG = "MAIN";
 FontxFile fx16G[2];
 FontxFile fx24G[2];
 FontxFile fx32G[2];
-
-// extern void check_activity(void);
-// extern float norm(float ax, float ay, float az);
-// extern float applyFilter(float x, float inputCoeff[], float outputCoeff, float yn1, float xn1);
-// extern void getAccelData(float* ax, float* ay, float* az);
-// extern void init_mpu6886(void);
-
-
 
 esp_err_t mountSPIFFS(char * partition_label, char * mount_point) {
 	ESP_LOGI(TAG, "Initializing SPIFFS");
@@ -174,25 +167,6 @@ static void printDirectory(char * path) {
 
 #define HIGH_ACCEL_THRESHOLD 2.5  // Threshold for high acceleration (impact)
 #define LOW_ACCEL_THRESHOLD 0.5   // Threshold for low acceleration (free fall)
-
-
-// static esp_err_t i2c_master_init(void)
-// {
-//     int i2c_master_port = I2C_MASTER_NUM;
-
-//     i2c_config_t conf = {
-//         .mode = I2C_MODE_MASTER,
-//         .sda_io_num = I2C_MASTER_SDA_IO,
-//         .scl_io_num = I2C_MASTER_SCL_IO,
-//         .sda_pullup_en = GPIO_PULLUP_ENABLE,
-//         .scl_pullup_en = GPIO_PULLUP_ENABLE,
-//         .master.clk_speed = I2C_MASTER_FREQ_HZ,
-//     };
-
-//     i2c_param_config(i2c_master_port, &conf);
-
-//     return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
-// }
 
 static esp_err_t mpu6886_register_read(uint8_t reg_addr, uint8_t *data, size_t len)
 {
@@ -339,7 +313,7 @@ void display_message(char* message, TFT_t * dev, int width, int height)
 	lcdDrawString(dev, fx32G, xpos, ypos, ascii, color);
 }
 
-void buzzer_init() {
+int buzzer_init() {
     rmt_config_t rmt_tx_config = RMT_DEFAULT_CONFIG_TX(BUZZER_PIN, RMT_TX_CHANNEL);
     rmt_tx_config.clk_div = RMT_CLK_DIV;
     rmt_config(&rmt_tx_config);
@@ -367,107 +341,174 @@ void buzzer_play_tone(float frequency, uint32_t duration_ms) {
     free(items);
 }
 
+#define BUTTON_A_GPIO 37
+#define BUTTON_B_GPIO 38
+
+void init_buttons(void) {
+    gpio_config_t io_conf;
+
+    // Configure Button A
+    io_conf.intr_type = GPIO_INTR_NEGEDGE;  // Trigger on falling edge
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pin_bit_mask = (1ULL << BUTTON_A_GPIO);
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    gpio_config(&io_conf);
+
+    // Configure Button B
+    io_conf.pin_bit_mask = (1ULL << BUTTON_B_GPIO);
+    gpio_config(&io_conf);
+
+    // Install GPIO ISR handler service
+    gpio_install_isr_service(0);
+    
+    // Attach the interrupt service routine
+    gpio_isr_handler_add(BUTTON_A_GPIO, button_isr_handler, (void *)BUTTON_A_GPIO);
+    gpio_isr_handler_add(BUTTON_B_GPIO, button_isr_handler, (void *)BUTTON_B_GPIO);
+}
+
+static QueueHandle_t gpio_evt_queue = NULL;
+static TimerHandle_t cancel_timer = NULL;
+static bool fall_detected = false;
+static bool cancel_flag = false;
+static bool alert_sent = false;
+
+static void IRAM_ATTR button_isr_handler(void* arg) {
+    uint32_t gpio_num = (uint32_t)arg;
+    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+}
+
+void button_task(void* arg) {
+    uint32_t io_num;
+    for(;;) {
+        if(xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
+            if(io_num == BUTTON_A_GPIO) {
+                ESP_LOGI(TAG, "Button A pressed");
+                // Handle Button A press
+                if (fallDetected) {
+                    ESP_LOGI(TAG, "Fall alert cancelled");
+                    cancelFlag = true;
+                    fallDetected = false;
+                    display_message("Fall alert cancelled!", &dev, width, height);
+                }
+            } else if(io_num == BUTTON_B_GPIO) {
+                ESP_LOGI(TAG, "Button B pressed");
+                // Handle Button B press
+            }
+        }
+    }
+}
+
+
+static void cancel_timer_callback(TimerHandle_t xTimer) {
+    if (!cancel_flag && fall_detected) {
+        ESP_LOGI(TAG, "Sending fall alert to server...");
+        // TODO: Send msg to server
+        alert_sent = true;
+        fall_detected = false;
+        display_message("Fall alert sent!", &dev, width, height);
+        buzzer_play_tone(2000, 3000);
+    }
+}
+
 void app_main(void)
 {
-	// Mount SPIFFS File System on FLASH
-	ESP_LOGI(TAG, "Initializing SPIFFS");
-	ESP_ERROR_CHECK(mountSPIFFS("storage1", "/fonts"));
-	printDirectory("/fonts");
-	ESP_ERROR_CHECK(mountSPIFFS("storage2", "/images"));
-	printDirectory("/images");
+    // Mount SPIFFS File System on FLASH
+    ESP_LOGI(TAG, "Initializing SPIFFS");
+    ESP_ERROR_CHECK(mountSPIFFS("storage1", "/fonts"));
+    printDirectory("/fonts");
+    ESP_ERROR_CHECK(mountSPIFFS("storage2", "/images"));
+    printDirectory("/images");
 
-	// Initialize i2c
-	i2c_master_init();
+    // Initialize I2C
+    i2c_master_init();
 
-	// init accelerometer
-    // ESP_ERROR_CHECK(i2c_master_init());
+    // Init accelerometer
     ESP_LOGI(TAG, "I2C initialized successfully");
-
     init_mpu6886();
 
-	// Start Task
-	// xTaskCreate(tft, "TFT", 1024*6, NULL, 2, NULL);
-
-	AXP192_PowerOn();
+    // Start Task
+    AXP192_PowerOn();
     AXP192_ScreenBreath(11);
 
-	TFT_t dev;
-	spi_master_init(&dev, CONFIG_MOSI_GPIO, CONFIG_SCLK_GPIO, CONFIG_CS_GPIO, CONFIG_DC_GPIO, CONFIG_RESET_GPIO, CONFIG_BL_GPIO);
-	lcdInit(&dev, CONFIG_WIDTH, CONFIG_HEIGHT, CONFIG_OFFSETX, CONFIG_OFFSETY);
+    TFT_t dev;
+    spi_master_init(&dev, CONFIG_MOSI_GPIO, CONFIG_SCLK_GPIO, CONFIG_CS_GPIO, CONFIG_DC_GPIO, CONFIG_RESET_GPIO, CONFIG_BL_GPIO);
+    lcdInit(&dev, CONFIG_WIDTH, CONFIG_HEIGHT, CONFIG_OFFSETX, CONFIG_OFFSETY);
 
-	// set font file
-	// FontxFile fx16G[2];
-	// FontxFile fx24G[2];
-	InitFontx(fx16G,"/fonts/ILGH16XB.FNT",""); // 8x16Dot Gothic
-	InitFontx(fx24G,"/fonts/ILGH24XB.FNT",""); // 12x24Dot Gothic
-	InitFontx(fx32G,"/fonts/ILGH32XB.FNT",""); // 16x32Dot Gothic
+    // Set font file
+    InitFontx(fx16G, "/fonts/ILGH16XB.FNT", ""); // 8x16Dot Gothic
+    InitFontx(fx24G, "/fonts/ILGH24XB.FNT", ""); // 12x24Dot Gothic
+    InitFontx(fx32G, "/fonts/ILGH32XB.FNT", ""); // 16x32Dot Gothic
 
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    init_buttons();
+    xTaskCreate(button_task, "button_task", 2048, NULL, 10, NULL);
 
-	int width = CONFIG_WIDTH;
-	int height = CONFIG_HEIGHT;
+    int width = CONFIG_WIDTH;
+    int height = CONFIG_HEIGHT;
 
-	float hpfCoeff[] = {0.99220722, -0.99220722};
+    float hpfCoeff[] = {0.99220722, -0.99220722};
     float hpfOutputCoeff = 0.98441445;
 
     float lpfCoeff[] = {0.03045903, 0.03045903};
     float lpfOutputCoeff = 0.93908194;
 
-	float accelX, accelY, accelZ;
-	float xn1 = 0;
-	float yn1 = 0;
-	float yn = 0;
-	float xn = 0;
+    float accelX, accelY, accelZ;
+    float xn1 = 0;
+    float yn1 = 0;
+    float yn = 0;
+    float xn = 0;
 
-	bool stepsUpdated = false;
-	int steps = 0;
-	bool oldWalkingState = false;
-	bool walking = false;
-	bool fallDetected = false;
+    bool fallDetected = false;
+    bool cancelFlag = false;
+    bool alertSent = false;
 
+    struct timeval time_last_step, time_current_step;
+    gettimeofday(&time_last_step, NULL);
+    display_message("", &dev, width, height);
 
-	struct timeval time_last_step, time_current_step;
-	gettimeofday(&time_last_step, NULL);
-	display_message("", &dev, width, height);
-
-	buzzer_init();
-    vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait for 1 second
+    buzzer_init();
+    vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait for 10 seconds
     buzzer_play_tone(1000, 500); // Play a 1 kHz tone for 500 ms
-    // vTaskDelay(500 / portTICK_PERIOD_MS); // Wait for 1 second
-    buzzer_play_tone(2000, 3000); // Play a 1 kHz tone for 500 ms
+    buzzer_play_tone(2000, 3000); // Play a 2 kHz tone for 3 seconds
 
-	// show_message(walking, steps, &dev, width, height);
-	display_message("Carl tripped!", &dev, width, height);
+    display_message("Carl tripped!", &dev, width, height);
 
+    while (1) {
+        getAccelData(&accelX, &accelY, &accelZ);
+        xn = norm(accelX, accelY, accelZ) - 1.05;
 
-	while (1)
-{   
-    getAccelData(&accelX, &accelY, &accelZ);
-    xn = norm(accelX, accelY, accelZ) - 1.05;
+        // Apply the HPF
+        yn = applyFilter(xn, hpfCoeff, hpfOutputCoeff, yn1, xn1);
 
-    // apply the hpf
-    yn = applyFilter(xn, hpfCoeff, hpfOutputCoeff, yn1, xn1);
+        // Apply the LPF
+        yn = applyFilter(yn, lpfCoeff, lpfOutputCoeff, yn1, xn1);
 
-    // apply the lpf
-    yn = applyFilter(xn, lpfCoeff, lpfOutputCoeff, yn1, xn1);
+        xn1 = xn;
+        yn1 = yn;
+        ESP_LOGI(TAG, "yn: %f", yn);
 
-    xn1 = xn;
-    yn1 = yn;
-    ESP_LOGI(TAG, "yn: %f", yn);
+        // Check for fall: High acceleration followed by low acceleration
+        if (!fallDetected && yn > HIGH_ACCEL_THRESHOLD) {
+            fallDetected = true;
+            gettimeofday(&time_current_step, NULL);
+            // Start the cancellation timer
+            cancelFlag = false;
+            alertSent = false;
+            TimerHandle_t cancel_timer = xTimerCreate("CancelTimer", pdMS_TO_TICKS(10000), pdFALSE, (void *)0, cancel_timer_callback);
+            if (cancel_timer != NULL) {
+                xTimerStart(cancel_timer, 0);
+            }
+        } else if (fallDetected && yn < LOW_ACCEL_THRESHOLD) {
+            // Fall detected
+            if (!cancelFlag && !alertSent) {
+                display_message("Fall detected!", &dev, width, height);
+                buzzer_play_tone(2000, 3000); // Alert for fall
+                // Wait for the cancellation window to expire before sending the alert
+            }
+            fallDetected = false; // Reset flag
+        }
 
-    // Check for fall: High acceleration followed by low acceleration
-    if (!fallDetected && yn > HIGH_ACCEL_THRESHOLD) {
-        fallDetected = true;
-        gettimeofday(&time_current_step, NULL);
-    } else if (fallDetected && yn < LOW_ACCEL_THRESHOLD) {
-        // Fall detected
-        ESP_LOGI(TAG, "Fall detected!");
-        display_message("Fall detected!", &dev, width, height);
-        buzzer_play_tone(2000, 3000); // Alert for fall
-        fallDetected = false; // Reset flag
+        usleep(10000);
     }
-
-    usleep(10000);
-}
-
-	
 }
