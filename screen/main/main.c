@@ -73,6 +73,10 @@ FontxFile fx16G[2];
 FontxFile fx24G[2];
 FontxFile fx32G[2];
 
+TFT_t dev;
+int width = CONFIG_WIDTH;
+int height = CONFIG_HEIGHT;
+
 esp_err_t mountSPIFFS(char * partition_label, char * mount_point) {
 	ESP_LOGI(TAG, "Initializing SPIFFS");
 	esp_vfs_spiffs_conf_t conf = {
@@ -313,7 +317,7 @@ void display_message(char* message, TFT_t * dev, int width, int height)
 	lcdDrawString(dev, fx32G, xpos, ypos, ascii, color);
 }
 
-int buzzer_init() {
+void buzzer_init() {
     rmt_config_t rmt_tx_config = RMT_DEFAULT_CONFIG_TX(BUZZER_PIN, RMT_TX_CHANNEL);
     rmt_tx_config.clk_div = RMT_CLK_DIV;
     rmt_config(&rmt_tx_config);
@@ -344,6 +348,17 @@ void buzzer_play_tone(float frequency, uint32_t duration_ms) {
 #define BUTTON_A_GPIO 37
 #define BUTTON_B_GPIO 38
 
+static QueueHandle_t gpio_evt_queue = NULL;
+static TimerHandle_t cancel_timer = NULL;
+static bool fall_detected = false;
+static bool cancel_flag = false;
+static bool alert_sent = false;
+
+static void IRAM_ATTR button_isr_handler(void* arg) {
+    uint32_t gpio_num = (uint32_t)arg;
+    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+}
+
 void init_buttons(void) {
     gpio_config_t io_conf;
 
@@ -367,17 +382,6 @@ void init_buttons(void) {
     gpio_isr_handler_add(BUTTON_B_GPIO, button_isr_handler, (void *)BUTTON_B_GPIO);
 }
 
-static QueueHandle_t gpio_evt_queue = NULL;
-static TimerHandle_t cancel_timer = NULL;
-static bool fall_detected = false;
-static bool cancel_flag = false;
-static bool alert_sent = false;
-
-static void IRAM_ATTR button_isr_handler(void* arg) {
-    uint32_t gpio_num = (uint32_t)arg;
-    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
-}
-
 void button_task(void* arg) {
     uint32_t io_num;
     for(;;) {
@@ -385,10 +389,10 @@ void button_task(void* arg) {
             if(io_num == BUTTON_A_GPIO) {
                 ESP_LOGI(TAG, "Button A pressed");
                 // Handle Button A press
-                if (fallDetected) {
+                if (fall_detected) {
                     ESP_LOGI(TAG, "Fall alert cancelled");
-                    cancelFlag = true;
-                    fallDetected = false;
+                    cancel_flag = true;
+                    fall_detected = false;
                     display_message("Fall alert cancelled!", &dev, width, height);
                 }
             } else if(io_num == BUTTON_B_GPIO) {
@@ -431,7 +435,6 @@ void app_main(void)
     AXP192_PowerOn();
     AXP192_ScreenBreath(11);
 
-    TFT_t dev;
     spi_master_init(&dev, CONFIG_MOSI_GPIO, CONFIG_SCLK_GPIO, CONFIG_CS_GPIO, CONFIG_DC_GPIO, CONFIG_RESET_GPIO, CONFIG_BL_GPIO);
     lcdInit(&dev, CONFIG_WIDTH, CONFIG_HEIGHT, CONFIG_OFFSETX, CONFIG_OFFSETY);
 
@@ -459,8 +462,8 @@ void app_main(void)
     float yn = 0;
     float xn = 0;
 
-    bool fallDetected = false;
-    bool cancelFlag = false;
+    bool fall_detected = false;
+    bool cancel_flag = false;
     bool alertSent = false;
 
     struct timeval time_last_step, time_current_step;
@@ -489,24 +492,24 @@ void app_main(void)
         ESP_LOGI(TAG, "yn: %f", yn);
 
         // Check for fall: High acceleration followed by low acceleration
-        if (!fallDetected && yn > HIGH_ACCEL_THRESHOLD) {
-            fallDetected = true;
+        if (!fall_detected && yn > HIGH_ACCEL_THRESHOLD) {
+            fall_detected = true;
             gettimeofday(&time_current_step, NULL);
             // Start the cancellation timer
-            cancelFlag = false;
+            cancel_flag = false;
             alertSent = false;
             TimerHandle_t cancel_timer = xTimerCreate("CancelTimer", pdMS_TO_TICKS(10000), pdFALSE, (void *)0, cancel_timer_callback);
             if (cancel_timer != NULL) {
                 xTimerStart(cancel_timer, 0);
             }
-        } else if (fallDetected && yn < LOW_ACCEL_THRESHOLD) {
+        } else if (fall_detected && yn < LOW_ACCEL_THRESHOLD) {
             // Fall detected
-            if (!cancelFlag && !alertSent) {
+            if (!cancel_flag && !alertSent) {
                 display_message("Fall detected!", &dev, width, height);
                 buzzer_play_tone(2000, 3000); // Alert for fall
                 // Wait for the cancellation window to expire before sending the alert
             }
-            fallDetected = false; // Reset flag
+            fall_detected = false; // Reset flag
         }
 
         usleep(10000);
