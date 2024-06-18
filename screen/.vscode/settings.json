@@ -8,6 +8,8 @@
     "idf.flashType": "UART",
     "files.associations": {
         "errno.h": "c",
-        "sdkconfig.h": "c"
-    }
+        "sdkconfig.h": "c",
+        "socket.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "enabled"
 }

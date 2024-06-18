@@ -172,6 +172,10 @@ static void printDirectory(char * path) {
 # define MPU6886_PWR_MGMT_1_REG_ADDR             0x6B
 # define MPU6886_PWR_MGMT_2_REG_ADDR             0x6C
 
+#define HIGH_ACCEL_THRESHOLD 2.5  // Threshold for high acceleration (impact)
+#define LOW_ACCEL_THRESHOLD 0.5   // Threshold for low acceleration (free fall)
+
+
 // static esp_err_t i2c_master_init(void)
 // {
 //     int i2c_master_port = I2C_MASTER_NUM;
@@ -277,7 +281,7 @@ void show_message(bool walking, int steps, TFT_t * dev, int width, int height)
 	char* text = "walking";
 	if (!walking)
 	{
-		text = "not walking";
+		text = "OK";
 	}
 	
 	uint8_t buffer[FontxGlyphBufSize];
@@ -418,6 +422,8 @@ void app_main(void)
 	int steps = 0;
 	bool oldWalkingState = false;
 	bool walking = false;
+	bool fallDetected = false;
+
 
 	struct timeval time_last_step, time_current_step;
 	gettimeofday(&time_last_step, NULL);
@@ -434,23 +440,34 @@ void app_main(void)
 
 
 	while (1)
-	{	
-		getAccelData(&accelX, &accelY, &accelZ);
-		xn = norm(accelX, accelY, accelZ) - 1.05;
+{   
+    getAccelData(&accelX, &accelY, &accelZ);
+    xn = norm(accelX, accelY, accelZ) - 1.05;
 
-		// apply the hpf
-		yn = applyFilter(xn, hpfCoeff, hpfOutputCoeff, yn1, xn1);
+    // apply the hpf
+    yn = applyFilter(xn, hpfCoeff, hpfOutputCoeff, yn1, xn1);
 
-		// apply the lpf
-		yn = applyFilter(xn, lpfCoeff, lpfOutputCoeff, yn1, xn1);
+    // apply the lpf
+    yn = applyFilter(xn, lpfCoeff, lpfOutputCoeff, yn1, xn1);
 
-		xn1 = xn;
-		yn1 = yn;
-		ESP_LOGI(TAG, "yn: %f", yn);
-	
-		usleep(10000);
-		// usleep(100000);
-		// usleep(500000);
-	}
+    xn1 = xn;
+    yn1 = yn;
+    ESP_LOGI(TAG, "yn: %f", yn);
+
+    // Check for fall: High acceleration followed by low acceleration
+    if (!fallDetected && yn > HIGH_ACCEL_THRESHOLD) {
+        fallDetected = true;
+        gettimeofday(&time_current_step, NULL);
+    } else if (fallDetected && yn < LOW_ACCEL_THRESHOLD) {
+        // Fall detected
+        ESP_LOGI(TAG, "Fall detected!");
+        display_message("Fall detected!", &dev, width, height);
+        buzzer_play_tone(2000, 3000); // Alert for fall
+        fallDetected = false; // Reset flag
+    }
+
+    usleep(10000);
+}
+
 	
 }
