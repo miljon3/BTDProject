@@ -41,7 +41,7 @@
 #define RMT_BUZZER_RESOLUTION_HZ 1000000 // 1MHz resolution
 #define RMT_BUZZER_GPIO_NUM      2
 
-#define CONFIG_BROKER_URL "mqtt://10.0.0.11:1883"
+#define CONFIG_BROKER_URL "mqtt://192.168.195.106:1883"
 
 #define BUZZER_PIN 2 // Example GPIO pin for buzzer
 
@@ -307,14 +307,46 @@ void show_message(bool walking, int steps, TFT_t * dev, int width, int height)
 	lcdDrawString(dev, fx32G, xpos, ypos, ascii, color);
 }
 
+void display_messages(char* message, char* subLine, TFT_t * dev, int width, int height)
+{
+	uint8_t buffer[FontxGlyphBufSize];
+	uint8_t fontWidth;
+	uint8_t fontHeight;
+	GetFontx(fx16G, 0, buffer, &fontWidth, &fontHeight);
+	// GetFontx(fx24G, 0, buffer, &fontWidth, &fontHeight);
+	GetFontx(fx32G, 0, buffer, &fontWidth, &fontHeight);
+
+	uint16_t color;
+	uint8_t ascii[40];
+	uint16_t xpos = 0;
+	uint16_t ypos = 15;
+
+    AXP192_ScreenBreath(11);
+	lcdFillScreen(dev, BLACK);
+	color = WHITE;
+	// lcdSetFontDirection(dev, 0);
+	xpos = ((width - fontHeight) / 2) - 1;
+	ypos = ((height - (11 * fontWidth)) / 2) - 5;
+    ypos = 0;
+	lcdSetFontDirection(dev, DIRECTION90);
+
+	strcpy((char *)ascii, subLine);
+	lcdDrawString(dev, fx16G, xpos, ypos, ascii, color);
+
+	xpos = xpos + 40;
+    strcpy((char *)ascii, message);
+	// strcpy((char *)ascii, text);
+	lcdDrawString(dev, fx32G, xpos, ypos, ascii, color);
+}
+
 void display_message(char* message, TFT_t * dev, int width, int height)
 {
 	uint8_t buffer[FontxGlyphBufSize];
 	uint8_t fontWidth;
 	uint8_t fontHeight;
-	// GetFontx(fx16G, 0, buffer, &fontWidth, &fontHeight);
-	GetFontx(fx24G, 0, buffer, &fontWidth, &fontHeight);
-	GetFontx(fx32G, 0, buffer, &fontWidth, &fontHeight);
+	GetFontx(fx16G, 0, buffer, &fontWidth, &fontHeight);
+	//GetFontx(fx24G, 0, buffer, &fontWidth, &fontHeight);
+	//GetFontx(fx32G, 0, buffer, &fontWidth, &fontHeight);
 
 	uint16_t color;
 	uint8_t ascii[40];
@@ -326,10 +358,11 @@ void display_message(char* message, TFT_t * dev, int width, int height)
 	// lcdSetFontDirection(dev, 0);
 	xpos = ((width - fontHeight) / 2) - 1;
 	ypos = (height - (13 * fontWidth)) / 2;
+    ypos = 0;
 	lcdSetFontDirection(dev, DIRECTION90);
 
 	strcpy((char *)ascii, message);
-	lcdDrawString(dev, fx32G, xpos, ypos, ascii, color);
+	lcdDrawString(dev, fx24G, xpos, ypos, ascii, color);
 }
 
 void buzzer_init() {
@@ -404,15 +437,17 @@ void button_task(void* arg) {
             if(io_num == BUTTON_A_GPIO) {
                 ESP_LOGI(TAG, "Button A pressed");
                 // Handle Button A press
-                if (fall_detected) {
+                if (cancel_timer != NULL) {
                     ESP_LOGI(TAG, "Fall alert cancelled");
                     cancel_flag = true;
                     fall_detected = false;
+                    xTimerStop(cancel_timer, 0);
                     display_message("Fall alert cancelled!", &dev, width, height);
                 }
             } else if(io_num == BUTTON_B_GPIO) {
                 ESP_LOGI(TAG, "Button B pressed");
                 // Handle Button B press
+                AXP192_ScreenBreath(0);
             }
         }
     }
@@ -638,15 +673,15 @@ static void mqtt5_app_start(void)
 static void cancel_timer_callback(TimerHandle_t xTimer) {
     ESP_LOGI(TAG, "Cancel timer has finished");
 
-    if (!cancel_flag) {
-        ESP_LOGI(TAG, "Sending fall alert to server...");
-        esp_mqtt_client_publish(mqtt_client, "/alarms/1", "data_3", 0, 1, 1);
+    //if (!cancel_flag) {
+    ESP_LOGI(TAG, "Sending fall alert to server...");
+    esp_mqtt_client_publish(mqtt_client, "/alarms/1", "data_3", 0, 1, 1);
 
-        alert_sent = true;
-        fall_detected = false;
-        display_message("Fall alert sent!", &dev, width, height);
-        buzzer_play_tone(2000, 3000);
-    }
+    alert_sent = true;
+    fall_detected = false;
+    display_message("Fall alert sent!", &dev, width, height);
+    //buzzer_play_tone(2000, 3000);
+    //}
 }
 
 void app_main(void)
@@ -665,7 +700,7 @@ void app_main(void)
 
     // Start Task
     AXP192_PowerOn();
-    AXP192_ScreenBreath(11);
+    AXP192_ScreenBreath(0);
 
     spi_master_init(&dev, CONFIG_MOSI_GPIO, CONFIG_SCLK_GPIO, CONFIG_CS_GPIO, CONFIG_DC_GPIO, CONFIG_RESET_GPIO, CONFIG_BL_GPIO);
     lcdInit(&dev, CONFIG_WIDTH, CONFIG_HEIGHT, CONFIG_OFFSETX, CONFIG_OFFSETY);
@@ -735,7 +770,7 @@ void app_main(void)
             // Start the cancellation timer
             cancel_flag = false;
             alertSent = false;
-            TimerHandle_t cancel_timer = xTimerCreate("CancelTimer", pdMS_TO_TICKS(10000), pdFALSE, (void *)0, cancel_timer_callback);
+            cancel_timer = xTimerCreate("CancelTimer", pdMS_TO_TICKS(10000), pdFALSE, (void *)0, cancel_timer_callback);
             if (cancel_timer != NULL) {
                 ESP_LOGI(TAG, "Starting the cancellation timer");
                 xTimerStart(cancel_timer, 0);
@@ -743,8 +778,9 @@ void app_main(void)
         } else if (fall_detected && yn < LOW_ACCEL_THRESHOLD) {
             // Fall detected
             if (!cancel_flag && !alertSent) {
-                display_message("Fall detected!", &dev, width, height);
-                buzzer_play_tone(2000, 3000); // Alert for fall
+                display_messages("Did you trip?", "Press big button to cancel alarm", &dev, width, height);
+                //display_message("Fall detected!", &dev, width, height);
+                //buzzer_play_tone(2000, 3000); // Alert for fall
                 // Wait for the cancellation window to expire before sending the alert
             }
             fall_detected = false; // Reset flag
